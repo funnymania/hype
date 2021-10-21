@@ -25,10 +25,10 @@ contract Hype {
            
     function send(address receiver, uint amount) public {
         if (amount > balances[msg.sender])
-          revert InsufficientBalance({
-              requested: amount,
-              available: balances[msg.sender]
-          });
+            revert InsufficientBalance({
+                requested: amount,
+                available: balances[msg.sender]
+            });
 
         balances[msg.sender] -= amount;
         balances[receiver] += amount;
