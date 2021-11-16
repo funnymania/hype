@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
-pragma solidity >=0.4.16 <0.9.0;
+pragma solidity ^0.8.0;
 
 contract Hype {
     struct Proposal {
         bytes32 name;   // short name (up to 32 bytes)
         uint voteCount; // number of accumulated votes
-        //uint proposalType; // 1: change membership, 2: spend reserver, 3: change distribution interval
+        address memberToChange;
+        address memberToSpend;
+        uint proposalType; // 0: nothing happens, 1: add member, 2: remove member, 3: spend reserver, 4: change distribution interval, 5: change weight
     }
-   
+    
+    // OPTIONAL: Names...
     string private _name = "Hype";
     string private _symbol = "HYP";
     
@@ -32,6 +35,7 @@ contract Hype {
         address balanceKey;
     }
     
+    //TODO: Add weight, make this votable
     struct MemberBalance {
         uint memberIndex;
         uint balance;
@@ -57,7 +61,8 @@ contract Hype {
     // map of addresses holding hype... [address:balance]
     mapping (address => uint) public balances;
     
-    // Cast a vote. No delegation. No weight. 
+    // Cast a vote. No delegation.
+    //TODO: could have a timer AND could end automatically when all members vote
     function vote(uint proposalIndex) external {
         if (balances[msg.sender] > 0) {
             currentProposals[proposalIndex].voteCount += balances[msg.sender];
@@ -68,7 +73,8 @@ contract Hype {
         }
     }
     
-    // Counts proposal votes. May want a dedicated "chairperson" for this, or just dev is fine. 
+    // Counts proposal votes.
+    // FIXME: Probably need a limitation on winningProposals size. 
     function countBallots() external {
         if (msg.sender != dev) 
             revert InvalidChairPerson();
@@ -82,7 +88,18 @@ contract Hype {
             }
         }
         
-        // FIXME: Probably need a limitation on winningProposals size. 
+        // 1: add member, 2: remove member, 3: spend reserver, 4: change distribution interval, 5: change weight
+        if (currentProposals[winningIndex].proposalType == 1) {
+            addMember(memberListcurrentProposals[winningIndex].memberToChange);
+            winningProposals.push(currentProposals[winningIndex]);
+        } else if (currentProposals[winningIndex].proposalType == 2) {
+            removeMember(memberListcurrentProposals[winningIndex].memberToChange);
+            winningProposals.push(currentProposals[winningIndex]);
+        } else if (currentProposals[winningIndex].proposalType == 3) {
+            spendReserver(memberListcurrentProposals[winningIndex].memberToSpend);
+            winningProposals.push(currentProposals[winningIndex]);
+        }
+        
         winningProposals.push(currentProposals[winningIndex]);
         
         // BROKEN: "memory to storage not yet supported"
@@ -96,7 +113,7 @@ contract Hype {
     // }
     
     // Submits a proposal to current vote. 
-    function submitProposal(bytes32 newProposal) external {
+    function submitProposal(Proposal memory newProposal) external {
         /**
          * bool isMember = false;
         for (uint i = 0; i < members.length; i++) {
@@ -106,8 +123,8 @@ contract Hype {
             }
         }*/
     
-        require(memberList.memberBalances[msg.sender].balance != 0, "Only members can submit proposals");
-        currentProposals.push(Proposal({ name: newProposal, voteCount: 0 }));
+        require(balances[msg.sender] != 0, "Must be staking to submit a proposal!");
+        currentProposals.push(newProposal);
     }
     
     function isChair(address caller) internal view returns (bool) {
@@ -115,9 +132,16 @@ contract Hype {
         else return true;
     }
     
+    function isMember(address caller) internal view returns (bool) {
+        if (memberList.members[memberList.memberBalances[caller].memberIndex].isActive 
+        && memberList.members[memberList.memberBalances[caller].memberIndex].balanceKey == caller) 
+            return true;
+        else return false;
+    }
+    
     // Add a new member. 
     function addMember(address newMember) external {
-        require(isChair(msg.sender), "You are not the chairperson!");
+        require(isChair(msg.sender) || isMember(msg.sender), "You are not the chairperson or a member!");
         memberList.size += 1;
         memberList.memberBalances[newMember] = MemberBalance({ memberIndex: memberList.size - 1, balance: 0 });
         memberList.members.push(Member({ isActive: true, balanceKey: newMember}));
