@@ -7,10 +7,10 @@ contract Hype {
         uint voteCount; // number of accumulated votes
         address memberToChange;
         address memberToSpend;
+        uint reserveAmtToSpend;
         uint proposalType; // 0: nothing happens, 1: add member, 2: remove member, 3: spend reserver, 4: change distribution interval, 5: change weight
     }
     
-    // OPTIONAL: Names...
     string private _name = "Hype";
     string private _symbol = "HYP";
     
@@ -18,12 +18,14 @@ contract Hype {
     uint8 private _decimals = 18;
     
     // Whole number amount of supply. Will not change.
-    uint256 private _totalSupply = 30 * 10**6 * 10**_decimals;
+    uint private _totalSupply = 30 * 10**6 * 10 ** _decimals;
     
-    // overrage
-    uint256 private total_division_leftovers = 0;
+    // Multiplier on the amount sent per distribution
+    uint private distributionAmountAdjustment = 1;
     
-    // dynamic list of members. probably need to define 
+    // Overrage
+    uint private totalDivisionLeftovers = 0;
+    
     struct MemberList {
         mapping(address => MemberBalance) memberBalances;
         Member[] members;
@@ -47,19 +49,134 @@ contract Hype {
     
     Proposal[] public winningProposals;
     
-    // time when tokens can be distributed again
-    uint256 timeNext = 0;
+    // Default is seconds in a year.
+    uint private timeSpan = 60 * 60 * 24 * 365;
     
-    // Account which will receive %5 of tokens.
+    uint private timeFactor = 1; 
+    
+    // frequency of token distribution. Default is 6 times a year.
+    uint public timeNext = timeSpan / 6;
+    
+    // Number of distributions total.
+    uint public amtOfDistributions = 600;
+    
+    uint lastBlockDistributed = block.timestamp;
+    
+    // Account which rewards dev team for their work
     address public dev;
     
     // Account for special purposes, such as helping people in need.
     address public reserve;
     
+    // Required per ERC-20
     mapping(address => mapping(address => uint256)) private _allowances;
     
-    // map of addresses holding hype... [address:balance]
+    // All user balances, and the treasury, excludes only members
     mapping (address => uint) public balances;
+    
+    constructor() {
+        dev = msg.sender;
+        balances[address(this)] += _totalSupply;
+        // distribute();
+    }
+    
+    // CONSIDER: Consider instead PRODUCING a certain amount of tokens every 60 days, and allocating them. There can in one contract only be so much
+    // of a coin in any one account. So, at some point there will be need to be tapering, or something more orchestrated emerge. 
+    // If we make  it possible for new coins to be produced at a variable interval, we can control production and adapt to  fluctuations in the market.
+    // If we haave a static supply, every single token is a complete distribution of control and voting rights to the winner of some tournament.
+    // This is... interesting. We can also make it possible for a holder of some dynamic supply to burn its supply. For instance, instead of transferring
+    // power by delegating, you can destroy your position, and this will have the affect of normalizing voting powers that exist somewhat. People with less votes 
+    // comparatively have more. People with more have less. This is complicated however,you need to convince people to  burn their supply. OR force it via vote but then
+    // that needs to be in the contract. 
+    // Is there anyway to force members to spend a certain amount of their allotment?
+    // Distribution every 60 days (perhaps using block number). 1% of total a year, so ~.167% of total every two months. Of this, 5% goes to dev,
+    // 1% to a reserve account for emergencies involving holders ( health complications ), 94% goes to members.
+    // If members is empty, 99% goes to dev. 
+    function distribute() public {
+        if (block.timestamp < timeNext + lastBlockDistributed)
+            revert DistributionDurationHasNotPassed({
+                timeRemaining: timeNext - block.timestamp
+            });
+        
+        lastBlockDistributed = block.timestamp;
+        
+        address treasury = address(this);
+        
+        // we are asuming even distribution patterns
+        // Default is distributions = 100 * 6 = 600.
+        // distribution amt is supply / distributions.
+        // Default freq (timeNext is 60*60*24*60 which is every 60 days.
+        // Default timeline approx 100 years
+        uint divyAmt = (_totalSupply / amtOfDistributions) * distributionAmountAdjustment;
+        if (memberList.size == 0) {
+            // Remove bi_monthly from treasury
+            uint dev_share = divyAmt / 100 * 99;
+            
+            balances[dev] += dev_share;
+            
+            uint reserve_share = divyAmt - dev_share;
+            balances[reserve] += reserve_share;
+            
+            balances[treasury] -= dev_share;
+            if (balances[treasury] < 0) {
+                balances[dev] += balances[treasury];
+                balances[treasury] = 0;
+            }
+            
+            balances[treasury] -= reserve_share;
+            if (balances[treasury] < 0) {
+                balances[reserve] += balances[treasury];
+                balances[treasury] = 0;
+            }
+        } else {
+            // Remove bi_monthly from treasury
+            uint dev_share = divyAmt / 20;
+            balances[dev] += dev_share;
+            
+            uint remainder_share = divyAmt - dev_share;
+            uint member_share = remainder_share / 100 * 94;
+            uint reserve_share = remainder_share - member_share;
+
+            //Remainder needs to be dealt with properly, overage/underage is in leftover,
+            //which we 
+            uint individual_member_share = member_share / memberList.size;
+            uint leftover = member_share;
+            for (uint i = 0; i < memberList.size; i++) {
+                if (memberList.members[i].isActive) {
+                    memberList.memberBalances[memberList.members[i].balanceKey].balance += individual_member_share;
+                    leftover -= individual_member_share;
+                }
+            }
+
+            // At year 99, there will be some small amount to be either paid back, or paid out. 
+            // If we have surplus, that gets shifted to reserve. Else, take it from reserve, then dev. 
+            totalDivisionLeftovers += leftover;
+
+            balances[reserve] += reserve_share;
+            balances[treasury] -= member_share;
+            balances[treasury] -= dev_share;
+            balances[treasury] -= reserve_share;
+        }
+    }
+    
+    // Decide how many times per allotment. EXAMPLE: passing 3, distribution is now 3 times per year)
+    function changeDistributionFrequency(uint newDuration) external {
+        if (msg.sender != dev)
+            revert InvalidChairPerson();
+        require(newDuration != 0, "Cannot divide by 0");
+        
+        timeNext = timeSpan / newDuration;
+    }
+    
+    // Decide how much is distributed per distribution. Default value (1) being unchanged would lead to supply gone in 100 years.
+    // adjustment being 2 would make twice the amount of HYP dropped per distribution, and 2x speed until supply depleted from that point. 
+    function changeDistributionAdjustment(uint adjustment) external {
+        if (msg.sender != dev)
+            revert InvalidChairPerson();
+        require(adjustment >= 0, "Cannot distribute funds back to treasury by this method");
+        
+        distributionAmountAdjustment = adjustment;
+    }
     
     // Cast a vote. No delegation.
     //TODO: could have a timer AND could end automatically when all members vote
@@ -90,13 +207,13 @@ contract Hype {
         
         // 1: add member, 2: remove member, 3: spend reserver, 4: change distribution interval, 5: change weight
         if (currentProposals[winningIndex].proposalType == 1) {
-            addMember(memberListcurrentProposals[winningIndex].memberToChange);
+            addMember(currentProposals[winningIndex].memberToChange);
             winningProposals.push(currentProposals[winningIndex]);
         } else if (currentProposals[winningIndex].proposalType == 2) {
-            removeMember(memberListcurrentProposals[winningIndex].memberToChange);
+            removeMember(currentProposals[winningIndex].memberToChange);
             winningProposals.push(currentProposals[winningIndex]);
         } else if (currentProposals[winningIndex].proposalType == 3) {
-            spendReserver(memberListcurrentProposals[winningIndex].memberToSpend);
+            spendReserver(currentProposals[winningIndex].memberToSpend, currentProposals[winningIndex].reserveAmtToSpend);
             winningProposals.push(currentProposals[winningIndex]);
         }
         
@@ -140,7 +257,7 @@ contract Hype {
     }
     
     // Add a new member. 
-    function addMember(address newMember) external {
+    function addMember(address newMember) public {
         require(isChair(msg.sender) || isMember(msg.sender), "You are not the chairperson or a member!");
         memberList.size += 1;
         memberList.memberBalances[newMember] = MemberBalance({ memberIndex: memberList.size - 1, balance: 0 });
@@ -149,7 +266,7 @@ contract Hype {
     }
     
     // Remove a new member, move their record to normal balances.
-    function removeMember(address removeMe) external {
+    function removeMember(address removeMe) public {
         require(isChair(msg.sender), "You are not the chairperson!");
         require(memberList.memberBalances[removeMe].balance != 0, "This is not a member");
         
@@ -163,7 +280,7 @@ contract Hype {
     }
     
     // Allocate funds for spending. 
-    function spendReserver(address memberToSpend, uint256 amt) external {
+    function spendReserver(address memberToSpend, uint256 amt) public {
         require(isChair(msg.sender), "You are not the chairperson!");
          _transfer(reserve, memberToSpend, amt);
     }
@@ -171,79 +288,7 @@ contract Hype {
     error InsufficientBalance(uint requested, uint available);
     error InsufficientAllowance(uint requested, uint allowance);
     error InvalidChairPerson();
-    error TwoMonthsHaveNotPassed(uint timeRemaining);
-    
-    constructor() {
-        dev = msg.sender;
-        balances[address(this)] += _totalSupply;
-        distribute();
-    }
-    
-    // CONSIDER: Consider instead PRODUCING a certain amount of tokens every 60 days, and allocating them. There can in one contract only be so much
-    // of a coin in any one account. So, at some point there will be need to be tapering, or something more orchestrated emerge. 
-    // If we make  it possible for new coins to be produced at a variable interval, we can control production and adapt to  fluctuations in the market.
-    // If we haave a static supply, every single token is a complete distribution of control and voting rights to the winner of some tournament.
-    // This is... interesting. We can also make it possible for a holder of some dynamic supply to burn its supply. For instance, instead of transferring
-    // power by delegating, you can destroy your position, and this will have the affect of normalizing voting powers that exist somewhat. People with less votes 
-    // comparatively have more. People with more have less. This is complicated however,you need to convince people to  burn their supply. OR force it via vote but then
-    // that needs to be in the contract. 
-    // Is there anyway to force members to spend a certain amount of their allotment?
-    // Distribution every 60 days (perhaps using block number). 1% of total a year, so ~.167% of total every two months. Of this, 5% goes to dev,
-    // 1% to a reserve account for emergencies involving holders ( health complications ), 94% goes to members.
-    // If members is empty, 99% goes to dev. 
-    function distribute() public {
-        if (block.timestamp < timeNext) 
-            revert TwoMonthsHaveNotPassed({
-                timeRemaining: timeNext - block.timestamp
-            });
-        
-        timeNext += 60 * 24 * 60 * 60; // 60 seconds in 1 minute, 60 minutes in 1 hour, 24 hours in one day, 60 days. 
-        
-        address treasury = address(this);
-        uint yearly = _totalSupply / 100 * 99; // 1% per year
-        uint bi_monthly = yearly / 6; // ~.167% every two months.
-        if (memberList.size == 0) {
-            // Remove bi_monthly from treasury
-            uint dev_share = bi_monthly / 100 * 99;
-            
-            balances[dev] += dev_share;
-            
-            uint reserve_share = bi_monthly - dev_share;
-            balances[reserve] += reserve_share;
-            
-            balances[treasury] -= dev_share;
-            balances[treasury] -= reserve_share;
-        } else {
-            // Remove bi_monthly from treasury
-            uint dev_share = bi_monthly / 20;
-            balances[dev] += dev_share;
-            
-            uint remainder_share = bi_monthly - dev_share;
-            uint member_share = remainder_share / 100 * 94;
-            uint reserve_share = remainder_share - member_share;
-
-            //Remainder needs to be dealt with properly, overage/underage is in leftover,
-            //which we 
-            uint individual_member_share = member_share / memberList.size;
-            uint leftover = member_share;
-            for (uint i = 0; i < memberList.size; i++) {
-                if (memberList.members[i].isActive) {
-                    memberList.memberBalances[memberList.members[i].balanceKey].balance += individual_member_share;
-                    leftover -= individual_member_share;
-                }
-            }
-
-            // At year 99, there will be some small amount to be either paid back, or paid out. 
-            // If we have surplus, that gets shifted to reserve. Else, take it from reserve, then dev. 
-            total_division_leftovers += leftover;
-
-
-            balances[reserve] += reserve_share;
-            balances[treasury] -= dev_share;
-            balances[treasury] -= member_share;
-            balances[treasury] -= reserve_share;
-        }
-    }
+    error DistributionDurationHasNotPassed(uint timeRemaining);
     
     function name() public view returns (string memory) {
         return _name;
